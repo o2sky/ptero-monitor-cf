@@ -1,4 +1,4 @@
-# 🦖 Pterodactyl Monitor - Cloudflare Worker 版
+# 🦖 Pterodactyl Monitor - Cloudflare Worker 版（点个小星星呗）
 
 翼龙面板服务器监控保活工具，部署在 Cloudflare Worker 上，使用 KV 存储数据。
 
