@@ -488,7 +488,48 @@ async function handleApi(request, env, path) {
     return jsonResponse({ success: true, imported, skipped, message: `导入 ${imported} 个，跳过 ${skipped} 个` });
   }
   
+  // GET /api/trigger - 手动触发监控检查
+  if (path === '/api/trigger' && method === 'GET') {
+    const result = await runMonitorCheck(env);
+    return jsonResponse({ 
+      success: true, 
+      message: '检查完成',
+      checked: result.checked,
+      restarted: result.restarted,
+      total: result.total
+    });
+  }
+  
   return jsonResponse({ error: 'Not found' }, 404);
+}
+
+// 执行监控检查（供 cron 和 API 触发调用）
+async function runMonitorCheck(env) {
+  const servers = await getServers(env);
+  let checked = 0, restarted = 0;
+  
+  for (const server of servers) {
+    if (!server.enabled) continue;
+    
+    const result = await fetchServerStatus(server.api_url, server.api_key, server.server_id);
+    checked++;
+    
+    if (result.success) {
+      server.last_status = result.status;
+      server.last_check = new Date().toISOString();
+      
+      // 自动重启离线服务器
+      if (result.status === 'offline') {
+        await sendPowerAction(server.api_url, server.api_key, server.server_id, 'start');
+        server.restart_count = (server.restart_count || 0) + 1;
+        await addLog(env, server.id, 'auto_restart', 'success', '检测到离线，自动启动');
+        restarted++;
+      }
+    }
+  }
+  
+  await saveServers(env, servers);
+  return { checked, restarted, total: servers.length };
 }
 
 // 主入口
@@ -517,26 +558,6 @@ export default {
   
   // 定时任务 - 监控检查
   async scheduled(event, env, ctx) {
-    const servers = await getServers(env);
-    
-    for (const server of servers) {
-      if (!server.enabled) continue;
-      
-      const result = await fetchServerStatus(server.api_url, server.api_key, server.server_id);
-      
-      if (result.success) {
-        server.last_status = result.status;
-        server.last_check = new Date().toISOString();
-        
-        // 自动重启离线服务器
-        if (result.status === 'offline') {
-          await sendPowerAction(server.api_url, server.api_key, server.server_id, 'start');
-          server.restart_count = (server.restart_count || 0) + 1;
-          await addLog(env, server.id, 'auto_restart', 'success', '检测到离线，自动启动');
-        }
-      }
-    }
-    
-    await saveServers(env, servers);
+    await runMonitorCheck(env);
   }
 };

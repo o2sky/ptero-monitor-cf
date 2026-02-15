@@ -1,4 +1,4 @@
-# 🦖 Pterodactyl Monitor - Cloudflare Worker 版（点个小星星呗）
+# 🦖 Pterodactyl Monitor - Cloudflare Worker 版
 
 翼龙面板服务器监控保活工具，部署在 Cloudflare Worker 上，使用 KV 存储数据。
 
@@ -7,7 +7,7 @@
 - 📊 服务器状态监控
 - 🔄 停机自动重启
 - 📦 配置导出/导入备份
-- ⏰ 定时检测（每分钟）
+- ⏰ 多种触发方式（Cron / HTTP）
 
 ## 部署步骤
 
@@ -39,10 +39,56 @@ wrangler deploy
 2. 进入 Workers & Pages
 3. 创建 Worker，粘贴 `index.js` 内容
 4. 创建 KV 命名空间，绑定为 `PTERO_KV`
-5. 设置 Cron 触发器：`* * * * *`
+5. 设置 Cron 触发器：`* * * * *`（可选）
+
+## 触发方式
+
+### 1. Cron 定时触发（推荐）
+
+在 `wrangler.toml` 中配置：
+```toml
+[triggers]
+crons = ["* * * * *"]  # 每分钟执行
+```
+
+### 2. HTTP 请求触发
+
+访问以下接口手动触发检查：
+```
+GET /api/trigger
+```
+
+返回示例：
+```json
+{
+  "success": true,
+  "message": "检查完成",
+  "checked": 3,
+  "restarted": 1,
+  "total": 5
+}
+```
+
+可配合外部监控服务（如 UptimeRobot、cron-job.org）定时请求触发。
+
+## API 接口
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/servers` | GET | 获取服务器列表 |
+| `/api/servers` | POST | 添加服务器 |
+| `/api/servers/:id` | DELETE | 删除服务器 |
+| `/api/servers/:id/toggle` | POST | 切换启用状态 |
+| `/api/servers/:id/status` | GET | 获取服务器状态 |
+| `/api/servers/:id/power` | POST | 电源操作 |
+| `/api/logs` | GET | 获取日志 |
+| `/api/backup/export` | GET | 导出备份 |
+| `/api/backup/import` | POST | 导入备份 |
+| `/api/trigger` | GET | 手动触发监控检查 |
 
 ## 注意事项
 
 - Worker 免费版每天 10 万请求，KV 每天 10 万次读写
-- 定时任务免费版每天 1000 次调用
+- Cron 触发器免费版每天限 1000 次（约每 1.5 分钟一次）
+- 如需更高频率检查，建议使用 HTTP 触发方式
 - API Key 存储在 KV 中，请确保 Worker 访问安全
