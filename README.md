@@ -1,5 +1,7 @@
 # 🦖 Pterodactyl Monitor - Cloudflare Worker 版
 
+容器版性能更佳： https://github.com/fascmer/ptero-monitor
+
 翼龙面板服务器监控保活工具，部署在 Cloudflare Worker 上，使用 KV 存储数据。
 
 ## 功能
