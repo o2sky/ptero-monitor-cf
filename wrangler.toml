@@ -5,7 +5,7 @@ compatibility_date = "2024-01-01"
 # KV 命名空间绑定
 [[kv_namespaces]]
 binding = "PTERO_KV"
-id = "你的KV_ID"  # 部署时替换
+id = "f41b22772682404b90a923752e89b460"  # 部署时替换
 
 # 定时任务 - 每分钟检查一次
 [triggers]
