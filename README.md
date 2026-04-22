@@ -37,7 +37,7 @@ wrangler deploy
 
 方式二：在 D1 Console 逐条粘贴
 进入 Dashboard → D1 → 你的数据库 → Console，依次执行以下三条：
-1
+
 
 
 CREATE TABLE IF NOT EXISTS servers (
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS servers (
   last_check    TEXT,
   restart_count INTEGER NOT NULL DEFAULT 0
 );
-2
+
 
 
 CREATE TABLE IF NOT EXISTS logs (
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS logs (
   message    TEXT,
   created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
-3
+
 
 
 CREATE INDEX IF NOT EXISTS idx_logs_server_id ON logs (server_id);
