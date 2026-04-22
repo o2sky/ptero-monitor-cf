@@ -59,7 +59,6 @@ const HTML_PAGE = `<!DOCTYPE html>
         <input type="text" id="add-name" placeholder="服务器名称">
         <input type="text" id="add-url" placeholder="API地址 (含服务器ID)">
         <input type="text" id="add-key" placeholder="API Key">
-        
       </div>
       <button class="btn btn-primary" onclick="addServer()">添加服务器</button>
       <button class="btn btn-success" onclick="showBackup()">📦 备份管理</button>
@@ -156,7 +155,7 @@ async function toggle(id) {
 }
 
 async function checkStatus(id) {
-  const res = await fetch('/api/servers/' + id + '/status');
+  await fetch('/api/servers/' + id + '/status');
   fetchServers();
 }
 
@@ -202,8 +201,8 @@ setInterval(fetchServers, 30000);
 </html>`;
 
 export { HTML_PAGE };
-// Pterodactyl Monitor - Cloudflare Worker Version
-// 使用 KV 存储数据
+
+// Pterodactyl Monitor - Cloudflare Worker (D1 版本)
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -211,7 +210,9 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type'
 };
 
+// ──────────────────────────────────────────────
 // 工具函数
+// ──────────────────────────────────────────────
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -225,45 +226,83 @@ function htmlResponse(html) {
   });
 }
 
-// KV 操作封装
+// ──────────────────────────────────────────────
+// D1 初始化：建表（首次运行自动执行）
+// ──────────────────────────────────────────────
+// D1 不支持 exec() 执行多条语句，改用 batch() 分开提交
+async function initDB(env) {
+  await env.PTERO_DB.batch([
+    env.PTERO_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS servers (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT    NOT NULL DEFAULT '未命名',
+        api_url       TEXT    NOT NULL DEFAULT '',
+        api_key       TEXT    NOT NULL DEFAULT '',
+        server_id     TEXT    NOT NULL DEFAULT '-',
+        proxy_url     TEXT    NOT NULL DEFAULT '',
+        enabled       INTEGER NOT NULL DEFAULT 1,
+        last_status   TEXT    NOT NULL DEFAULT 'unknown',
+        last_check    TEXT,
+        restart_count INTEGER NOT NULL DEFAULT 0
+      )
+    `),
+    env.PTERO_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS logs (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id  INTEGER NOT NULL,
+        action     TEXT    NOT NULL,
+        status     TEXT    NOT NULL,
+        message    TEXT,
+        created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+      )
+    `),
+    env.PTERO_DB.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_logs_server_id ON logs (server_id)
+    `),
+    env.PTERO_DB.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs (created_at DESC)
+    `)
+  ]);
+}
+
+// ──────────────────────────────────────────────
+// D1 封装：服务器 CRUD
+// ──────────────────────────────────────────────
 async function getServers(env) {
-  const data = await env.PTERO_KV.get('servers', 'json');
-  return data || [];
+  const { results } = await env.PTERO_DB.prepare(
+    'SELECT * FROM servers ORDER BY id ASC'
+  ).all();
+  // D1 以 0/1 存 boolean，统一转换
+  return results.map(normalizeServer);
 }
 
-async function saveServers(env, servers) {
-  await env.PTERO_KV.put('servers', JSON.stringify(servers));
+async function getServerById(env, id) {
+  const row = await env.PTERO_DB.prepare(
+    'SELECT * FROM servers WHERE id = ?'
+  ).bind(id).first();
+  return row ? normalizeServer(row) : null;
 }
 
-async function getSettings(env) {
-  const data = await env.PTERO_KV.get('settings', 'json');
-  return data || {};
-}
-
-async function saveSettings(env, settings) {
-  await env.PTERO_KV.put('settings', JSON.stringify(settings));
-}
-
-async function getLogs(env) {
-  const data = await env.PTERO_KV.get('logs', 'json');
-  return data || [];
+function normalizeServer(row) {
+  return { ...row, enabled: !!row.enabled };
 }
 
 async function addLog(env, serverId, action, status, message) {
-  const logs = await getLogs(env);
-  logs.unshift({
-    id: Date.now(),
-    server_id: serverId,
-    action,
-    status,
-    message,
-    created_at: new Date().toISOString()
-  });
-  // 只保留最近500条日志
-  await env.PTERO_KV.put('logs', JSON.stringify(logs.slice(0, 500)));
+  await env.PTERO_DB.prepare(
+    'INSERT INTO logs (server_id, action, status, message) VALUES (?, ?, ?, ?)'
+  ).bind(serverId, action, status, message ?? '').run();
+
+  // 只保留最近 500 条
+  await env.PTERO_DB.prepare(`
+    DELETE FROM logs WHERE id NOT IN (
+      SELECT id FROM logs ORDER BY id DESC LIMIT 500
+    )
+  `).run();
 }
 
-// 翼龙 API 请求 (使用 fetch，CF Worker 原生支持)
+// ──────────────────────────────────────────────
+// 翼龙 API 请求
+// ──────────────────────────────────────────────
 async function fetchServerStatus(apiUrl, apiKey, serverId) {
   let baseUrl = apiUrl.replace(/\/$/, '');
   if (!serverId || serverId === '-') {
@@ -273,17 +312,15 @@ async function fetchServerStatus(apiUrl, apiKey, serverId) {
       baseUrl = baseUrl.replace(/\/[a-f0-9-]{8,}$/i, '');
     }
   }
-  
-  const url = `${baseUrl}/${serverId}/resources`;
-  
+
   try {
-    const resp = await fetch(url, {
+    const resp = await fetch(`${baseUrl}/${serverId}/resources`, {
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Accept': 'application/json'
       }
     });
-    
+
     if (resp.ok) {
       const data = await resp.json();
       return {
@@ -291,9 +328,8 @@ async function fetchServerStatus(apiUrl, apiKey, serverId) {
         status: data.attributes?.current_state || 'unknown',
         resources: data.attributes || {}
       };
-    } else {
-      return { success: false, error: `HTTP ${resp.status}` };
     }
+    return { success: false, error: `HTTP ${resp.status}` };
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -308,11 +344,9 @@ async function sendPowerAction(apiUrl, apiKey, serverId, action) {
       baseUrl = baseUrl.replace(/\/[a-f0-9-]{8,}$/i, '');
     }
   }
-  
-  const url = `${baseUrl}/${serverId}/power`;
-  
+
   try {
-    const resp = await fetch(url, {
+    const resp = await fetch(`${baseUrl}/${serverId}/power`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -321,132 +355,128 @@ async function sendPowerAction(apiUrl, apiKey, serverId, action) {
       },
       body: JSON.stringify({ signal: action })
     });
-    
     return { success: resp.ok };
   } catch (e) {
     return { success: false, error: e.message };
   }
 }
 
-// API 路由处理
+// ──────────────────────────────────────────────
+// API 路由
+// ──────────────────────────────────────────────
 async function handleApi(request, env, path) {
   const method = request.method;
-  
-  // GET /api/servers - 获取服务器列表
+
+  // GET /api/servers
   if (path === '/api/servers' && method === 'GET') {
     const servers = await getServers(env);
     return jsonResponse({ success: true, servers });
   }
-  
-  // POST /api/servers - 添加服务器
+
+  // POST /api/servers
   if (path === '/api/servers' && method === 'POST') {
     const body = await request.json();
-    const servers = await getServers(env);
-    
-    const newServer = {
-      id: Date.now(),
-      name: body.name || '未命名',
-      api_url: body.api_url || '',
-      api_key: body.api_key || '',
-      server_id: body.server_id || '-',
-      
-      enabled: true,
-      last_status: 'unknown',
-      restart_count: 0,
-      proxy_url: body.proxy_url || ''
-    };
-    
-    servers.push(newServer);
-    await saveServers(env, servers);
-    await addLog(env, newServer.id, 'add', 'success', `添加服务器: ${newServer.name}`);
-    
-    return jsonResponse({ success: true, server: newServer });
+    const { meta } = await env.PTERO_DB.prepare(`
+      INSERT INTO servers (name, api_url, api_key, server_id, proxy_url)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(
+      body.name || '未命名',
+      body.api_url || '',
+      body.api_key || '',
+      body.server_id || '-',
+      body.proxy_url || ''
+    ).run();
+
+    const newId = meta.last_row_id;
+    await addLog(env, newId, 'add', 'success', `添加服务器: ${body.name || '未命名'}`);
+    const server = await getServerById(env, newId);
+    return jsonResponse({ success: true, server });
   }
-  
+
   // DELETE /api/servers/:id
   if (path.match(/^\/api\/servers\/\d+$/) && method === 'DELETE') {
     const id = parseInt(path.split('/').pop());
-    let servers = await getServers(env);
-    servers = servers.filter(s => s.id !== id);
-    await saveServers(env, servers);
+    await env.PTERO_DB.prepare('DELETE FROM servers WHERE id = ?').bind(id).run();
     return jsonResponse({ success: true });
   }
-  
-  // POST /api/servers/:id/toggle - 切换启用状态
-  if (path.match(/^\/api\/servers\/\d+\/toggle$/) && method === 'POST') {
-    const id = parseInt(path.split('/')[3]);
-    const servers = await getServers(env);
-    const server = servers.find(s => s.id === id);
-    if (server) {
-      server.enabled = !server.enabled;
-      await saveServers(env, servers);
-    }
-    return jsonResponse({ success: true, enabled: server?.enabled });
-  }
-  
-  // PUT /api/servers/:id - 更新服务器
+
+  // PUT /api/servers/:id
   if (path.match(/^\/api\/servers\/\d+$/) && method === 'PUT') {
     const id = parseInt(path.split('/').pop());
     const body = await request.json();
-    const servers = await getServers(env);
-    const server = servers.find(s => s.id === id);
-    if (server) {
-      Object.assign(server, body);
-      await saveServers(env, servers);
+    // 只允许更新这几个字段，防止意外覆盖
+    const fields = ['name', 'api_url', 'api_key', 'server_id', 'proxy_url', 'enabled'];
+    const updates = fields.filter(f => f in body);
+    if (updates.length) {
+      const set = updates.map(f => `${f} = ?`).join(', ');
+      const vals = updates.map(f => f === 'enabled' ? (body[f] ? 1 : 0) : body[f]);
+      await env.PTERO_DB.prepare(`UPDATE servers SET ${set} WHERE id = ?`)
+        .bind(...vals, id).run();
     }
     return jsonResponse({ success: true });
   }
-  
-  // GET /api/servers/:id/status - 获取服务器状态
+
+  // POST /api/servers/:id/toggle
+  if (path.match(/^\/api\/servers\/\d+\/toggle$/) && method === 'POST') {
+    const id = parseInt(path.split('/')[3]);
+    const server = await getServerById(env, id);
+    if (!server) return jsonResponse({ success: false, error: 'Not found' }, 404);
+    const next = server.enabled ? 0 : 1;
+    await env.PTERO_DB.prepare('UPDATE servers SET enabled = ? WHERE id = ?').bind(next, id).run();
+    return jsonResponse({ success: true, enabled: !!next });
+  }
+
+  // GET /api/servers/:id/status
   if (path.match(/^\/api\/servers\/\d+\/status$/) && method === 'GET') {
     const id = parseInt(path.split('/')[3]);
-    const servers = await getServers(env);
-    const server = servers.find(s => s.id === id);
+    const server = await getServerById(env, id);
     if (!server) return jsonResponse({ success: false, error: 'Not found' }, 404);
-    
+
     const result = await fetchServerStatus(server.api_url, server.api_key, server.server_id);
     if (result.success) {
-      server.last_status = result.status;
-      server.last_check = new Date().toISOString();
-      await saveServers(env, servers);
+      await env.PTERO_DB.prepare(
+        'UPDATE servers SET last_status = ?, last_check = ? WHERE id = ?'
+      ).bind(result.status, new Date().toISOString(), id).run();
     }
     return jsonResponse(result);
   }
-  
-  // POST /api/servers/:id/power - 电源操作
+
+  // POST /api/servers/:id/power
   if (path.match(/^\/api\/servers\/\d+\/power$/) && method === 'POST') {
     const id = parseInt(path.split('/')[3]);
     const body = await request.json();
-    const servers = await getServers(env);
-    const server = servers.find(s => s.id === id);
+    const server = await getServerById(env, id);
     if (!server) return jsonResponse({ success: false, error: 'Not found' }, 404);
-    
+
     const result = await sendPowerAction(server.api_url, server.api_key, server.server_id, body.action);
-    await addLog(env, id, body.action, result.success ? 'success' : 'error', 
-      result.success ? `执行 ${body.action}` : result.error);
+    await addLog(env, id, body.action,
+      result.success ? 'success' : 'error',
+      result.success ? `执行 ${body.action}` : result.error
+    );
     return jsonResponse(result);
   }
-  
-  // GET /api/logs - 获取日志
+
+  // GET /api/logs
   if (path === '/api/logs' && method === 'GET') {
-    const logs = await getLogs(env);
-    return jsonResponse({ success: true, logs: logs.slice(0, 100) });
+    const { results } = await env.PTERO_DB.prepare(
+      'SELECT * FROM logs ORDER BY id DESC LIMIT 100'
+    ).all();
+    return jsonResponse({ success: true, logs: results });
   }
-  
-  // GET /api/backup/export - 导出备份
+
+  // GET /api/backup/export
   if (path === '/api/backup/export' && method === 'GET') {
     const servers = await getServers(env);
     const backup = {
-      version: '1.0',
+      version: '2.0',
       exported_at: new Date().toISOString(),
       servers: servers.map(s => ({
         name: s.name,
         api_url: s.api_url,
         api_key: s.api_key,
         server_id: s.server_id,
-        
-        enabled: s.enabled,
-        proxy_url: s.proxy_url || ''
+        proxy_url: s.proxy_url,
+        enabled: s.enabled
       }))
     };
     return new Response(JSON.stringify(backup, null, 2), {
@@ -456,108 +486,113 @@ async function handleApi(request, env, path) {
       }
     });
   }
-  
-  // POST /api/backup/import - 导入备份
+
+  // POST /api/backup/import
   if (path === '/api/backup/import' && method === 'POST') {
     const body = await request.json();
     if (!body.servers) return jsonResponse({ success: false, error: '无效的备份文件' }, 400);
-    
-    const servers = await getServers(env);
+
+    const existing = await getServers(env);
     let imported = 0, skipped = 0;
-    
+
+    // 批量插入（D1 支持批处理）
+    const stmts = [];
     for (const s of body.servers) {
-      const exists = servers.find(x => x.api_url === s.api_url && x.server_id === s.server_id);
-      if (exists) { skipped++; continue; }
-      
-      servers.push({
-        id: Date.now() + imported,
-        name: s.name || '未命名',
-        api_url: s.api_url,
-        api_key: s.api_key,
-        server_id: s.server_id || '-',
-        
-        enabled: s.enabled !== false,
-        last_status: 'unknown',
-        restart_count: 0,
-        proxy_url: s.proxy_url || ''
-      });
+      const dup = existing.find(x => x.api_url === s.api_url && x.server_id === (s.server_id || '-'));
+      if (dup) { skipped++; continue; }
+      stmts.push(
+        env.PTERO_DB.prepare(`
+          INSERT INTO servers (name, api_url, api_key, server_id, proxy_url, enabled)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).bind(
+          s.name || '未命名',
+          s.api_url || '',
+          s.api_key || '',
+          s.server_id || '-',
+          s.proxy_url || '',
+          s.enabled !== false ? 1 : 0
+        )
+      );
       imported++;
     }
-    
-    await saveServers(env, servers);
+
+    if (stmts.length) await env.PTERO_DB.batch(stmts);
     return jsonResponse({ success: true, imported, skipped, message: `导入 ${imported} 个，跳过 ${skipped} 个` });
   }
-  
-  // GET /api/trigger - 手动触发监控检查
+
+  // GET /api/trigger
   if (path === '/api/trigger' && method === 'GET') {
     const result = await runMonitorCheck(env);
-    return jsonResponse({ 
-      success: true, 
-      message: '检查完成',
-      checked: result.checked,
-      restarted: result.restarted,
-      total: result.total
-    });
+    return jsonResponse({ success: true, message: '检查完成', ...result });
   }
-  
+
   return jsonResponse({ error: 'Not found' }, 404);
 }
 
-// 执行监控检查（供 cron 和 API 触发调用）
+// ──────────────────────────────────────────────
+// 定时监控检查
+// ──────────────────────────────────────────────
 async function runMonitorCheck(env) {
   const servers = await getServers(env);
   let checked = 0, restarted = 0;
-  
+
   for (const server of servers) {
     if (!server.enabled) continue;
-    
+
     const result = await fetchServerStatus(server.api_url, server.api_key, server.server_id);
     checked++;
-    
+
     if (result.success) {
-      server.last_status = result.status;
-      server.last_check = new Date().toISOString();
-      
-      // 自动重启离线服务器
+      const now = new Date().toISOString();
+
       if (result.status === 'offline') {
         await sendPowerAction(server.api_url, server.api_key, server.server_id, 'start');
-        server.restart_count = (server.restart_count || 0) + 1;
+        await env.PTERO_DB.prepare(`
+          UPDATE servers
+          SET last_status = ?, last_check = ?, restart_count = restart_count + 1
+          WHERE id = ?
+        `).bind(result.status, now, server.id).run();
         await addLog(env, server.id, 'auto_restart', 'success', '检测到离线，自动启动');
         restarted++;
+      } else {
+        await env.PTERO_DB.prepare(
+          'UPDATE servers SET last_status = ?, last_check = ? WHERE id = ?'
+        ).bind(result.status, now, server.id).run();
       }
     }
   }
-  
-  await saveServers(env, servers);
+
   return { checked, restarted, total: servers.length };
 }
 
+// ──────────────────────────────────────────────
 // 主入口
+// ──────────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
+    // 确保表已存在
+    await initDB(env);
+
     const url = new URL(request.url);
     const path = url.pathname;
-    
-    // CORS preflight
+
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
     }
-    
-    // API 路由
+
     if (path.startsWith('/api/')) {
       return handleApi(request, env, path);
     }
-    
-    // 首页
+
     if (path === '/' || path === '/index.html') {
       return htmlResponse(HTML_PAGE);
     }
-    
+
     return new Response('Not Found', { status: 404 });
   },
-  
-  // 定时任务 - 监控检查
+
   async scheduled(event, env, ctx) {
+    await initDB(env);
     await runMonitorCheck(env);
   }
 };
