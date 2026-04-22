@@ -37,7 +37,10 @@ wrangler deploy
 
 方式二：在 D1 Console 逐条粘贴
 进入 Dashboard → D1 → 你的数据库 → Console，依次执行以下三条：
-1=CREATE TABLE IF NOT EXISTS servers (
+1
+
+
+CREATE TABLE IF NOT EXISTS servers (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   name          TEXT    NOT NULL DEFAULT '未命名',
   api_url       TEXT    NOT NULL DEFAULT '',
@@ -49,7 +52,10 @@ wrangler deploy
   last_check    TEXT,
   restart_count INTEGER NOT NULL DEFAULT 0
 );
-2=CREATE TABLE IF NOT EXISTS logs (
+2
+
+
+CREATE TABLE IF NOT EXISTS logs (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   server_id  INTEGER NOT NULL,
   action     TEXT    NOT NULL,
@@ -57,7 +63,10 @@ wrangler deploy
   message    TEXT,
   created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
-3=CREATE INDEX IF NOT EXISTS idx_logs_server_id ON logs (server_id);
+3
+
+
+CREATE INDEX IF NOT EXISTS idx_logs_server_id ON logs (server_id);
 
 建完后刷新页面，数据就能正常存储了。
 
